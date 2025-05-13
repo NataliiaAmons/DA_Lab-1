@@ -1,8 +1,10 @@
+setwd("D://UNI//da//lab 2")
 library(tidyverse)
 library(scales)
 library(dplyr)
 library(stringr)
-
+library(GGally)
+library(boot)
 
 movies_initial <- read_csv("TMDB_movie_dataset_v11.csv")
 
@@ -87,44 +89,18 @@ movies_clean <- movies_initial %>%
 
 
 
-
-
-
 movies <- movies_clean
 
-# q-q-графік для бюджету
-ggplot(movies, aes(sample = budget)) +
-  stat_qq(alpha = 0.3) +
-  stat_qq_line() +  
-  labs(x = "Теоретичні квантилі", y = "Квантилі бюджету") +
-  theme_minimal()+
-  theme(text = element_text(size = 15))
-
-# log q-q-графік для бюджету
-ggplot(movies, aes(sample = log(budget))) +
-  stat_qq(alpha = 0.3) +
-  stat_qq_line() +  
-  labs(x = "Теоретичні квантилі", y = "Квантилі логарифмованого бюджету") +
-  theme_minimal()+
-  theme(text = element_text(size = 15))
 
 
-# q-q-графік для тривалості
-ggplot(movies, aes(sample = runtime)) +
-  stat_qq(alpha = 0.3) +
-  stat_qq_line() + 
-  labs(x = "Теоретичні квантилі", y = "Квантилі тривалості фільму") +
-  theme_minimal()+
-  theme(text = element_text(size = 15))
-
-# q-q-графік для тривалості
-ggplot(movies, aes(sample = log(runtime))) +
-  stat_qq(alpha = 0.3) +
-  stat_qq_line() + 
-  labs(x = "Теоретичні квантилі", y = "Квантилі логарифмованої тривалості") +
-  theme_minimal()+
-  theme(text = element_text(size = 15))
-
+# кореляційні матриці
+movies_numeric <- movies[, c("vote_average", "vote_count", "revenue", "runtime",
+                                   "budget", "release_year", "release_month", "release_day")]
+# пірсона
+ggcorr(movies_numeric, label = TRUE)
+# спірмана
+spearman_corr <- cor(movies_numeric, method = "spearman")
+ggcorr(movies_numeric, method = c("pairwise", "spe"), label = TRUE)
 
 
 
@@ -157,30 +133,47 @@ separate_companies <- separate_companies %>%
   ))
 
 
-# сумарні бюджети для компаній
-company_budget_sum <- separate_companies %>%
+
+# ДІ для середнього бюджету в топ компаніях
+
+# відберемо потрібні стовпці для обчислень
+x_cb <- separate_companies[, c("production_companies", "budget")] %>% 
+  filter(!is.na(budget))
+
+# функція для розрахунку ДІ
+ci_avg_budget <- x_cb %>% 
   group_by(production_companies) %>%
   filter(!is.na(production_companies))%>%
   filter(!is.na(budget))%>%
-  summarize(sum_budget = sum(budget, na.rm = TRUE), 
-            movie_count = n() ) %>%
+  summarize(sum_budget = sum(budget, na.rm = TRUE),
+            mean = mean(budget),
+            sd = sd(budget),
+            n = n(),
+            se = sd/sqrt(n()),
+            a = mean(budget) + qnorm(0.025) * se,
+            b = mean(budget) + qnorm(0.975) * se)%>%
   arrange(desc(sum_budget))%>%
   slice_max(sum_budget, n = 20)
 
-# сумарні бюджети та кількість фільмів для компаній
-company_budget_sum %>%  arrange(desc(company_budget_sum$sum_budget)) %>% view()
+# вивід таблиці
+ci_avg_budget%>% 
+  arrange(desc(mean))%>%
+  select(-sum_budget)%>%
+  view()
 
 # побудова графіка
-ggplot(company_budget_sum, aes(x = reorder(production_companies, sum_budget), y = sum_budget, size = movie_count)) +
-  geom_segment( aes(x=reorder(production_companies, sum_budget), 
-                    xend=reorder(production_companies, sum_budget),
-                    y=0, yend=sum_budget), color="grey") +
-  geom_point( color="orange", size=4)+
-  coord_flip()+
-  labs(x = "Компанії", y = "Сумарний бюджет", size = "Кількість фільмів")+
-  theme(text = element_text(size = 15))+
-  theme_bw()+
-  scale_y_continuous(labels = dollar_format(scale = 1e-6, suffix = "M"))
+ggplot(ci_avg_budget, aes(x = reorder(production_companies, mean), y = mean)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = a, ymax = b), width = 0.3) +
+  coord_flip() +
+  labs(
+    title = "ДІ для середнього бюджету в компаніях з найбійльшим сумарним бюджетом",
+    x = "Компанії",
+    y = "ДІ для середнього бюджету"
+  ) +
+  theme_minimal()
+
+
 
 
 
@@ -190,62 +183,65 @@ ggplot(company_budget_sum, aes(x = reorder(production_companies, sum_budget), y 
 
 "Чи впливає тривалість фільму на бюджет?"
 
-# позбудемося рядків що не попадуть на графік
-new_movies <- movies %>% filter(!is.na(runtime)) 
-new_movies <- new_movies %>%filter(!is.na(budget))
+set.seed(100)
+
+# ДІ для кореляції між бюджетом та тривалістю
+
+# відберемо потрібні стовпці для обчислень
+x_br <- movies[, c("budget", "runtime")] %>% 
+  filter(!is.na(budget))%>%
+  filter(!is.na(runtime))
+
+# статистика для бутстрепу
+boot_cor <- function(x, indices){
+  cor_bar <- cor(x[indices, ])[1, 2]
+  return(cor_bar)
+}
+
+# функція для розрахунку ДІ
+boot_cor_ci <- function(data, R = 5000, conf = 0.95) {
+
+  boot_out <- tryCatch({
+    boot(data = data, statistic = boot_cor, R = R)
+  }, error = function(e) return(NULL))
+  
+  ci <- boot.ci(boot_out, type = c("norm", "basic", "perc", "bca"), conf = conf)
+  
+  ci_low_norm <- ci$norm[2]
+  ci_high_norm <- ci$norm[3]
+  
+  ci_low_basic <- ci$basic[4]
+  ci_high_basic <- ci$basic[5]
+  
+  ci_low_perc <- ci$percent[4]
+  ci_high_perc <- ci$percent[5]
+  
+  ci_low_bca <- ci$bca[4]
+  ci_high_bca <- ci$bca[5]
+  
+  tibble(
+    cor = cor(data)[1, 2],
+    se = sd(boot_out$t),
+    ci_norm_low = ci_low_norm,
+    ci_norm_high = ci_high_norm,
+    ci_basic_low = ci_low_basic,
+    ci_basic_high = ci_high_basic,
+    ci_perc_low = ci_low_perc,
+    ci_perc_high = ci_high_perc,
+    ci_bca_low = ci_low_bca,
+    ci_bca_high = ci_high_bca
+  )
+}
+
+# застосування функції пошуку ДІ
+result <- boot_cor_ci(x_br)
+
+# вивід таблиці
+result%>%view()
 
 
-# view найбільший бюджет
-new_movies %>% select(id, title,budget, runtime) %>%
-  arrange(desc(new_movies$budget)) %>% view()
-
-# view найменший бюджет
-new_movies %>% select(id, title,budget) %>%
-  arrange(new_movies$budget) %>% view()
-
-# view найбільша тривалість
-new_movies %>% select(id, title,budget, runtime) %>%
-  arrange(desc(new_movies$runtime)) %>% view()
-
-# view найменшиа тривалість
-new_movies %>% select(id, title,runtime) %>%
-  arrange(new_movies$runtime) %>% view()
-
-runtime_to_na <- c(1221350, 1407985, 1407979, 1329543, 1297501, 1149393, 1297501,
-                   1422046, 1305464, 1305448, 1389081, 1411972, 604529, 1280165,
-                   1280118, 1309787, 1443026, 1391492, 1305527, 1304078, 1219508, 
-                   1198660, 1446249, 1252015, 1394286, 1375597, 1251255, 1251251,
-                   1392831, 1123268, 1388897, 898555, 1225733, 1455260, 375569, 
-                   1174831, 1261349, 1233925, 64505, 1337824, 1210368, 1231022,
-                   1194488, 1291825, 1243479, 1261317, 1297562, 1454675, 916116,
-                   787838, 1372631, 1454247,  1291168, 1245274, 1244858, 1229874,
-                   1232028, 1244454, 1428634, 998162, 1236010, 1026095, 292374,
-                   1234955, 29266, 1369012, 1400976, 1425003, 1338706, 1228387,
-                   914213, 1412549, 1425498, 1370730, 1200123, 1237183)
-
-new_movies$runtime[new_movies$id %in% runtime_to_na] <- NA
-
-# побудувати без нулів
-ggplot(new_movies, aes(x = runtime, y = budget))+
-  geom_point(alpha = 0.3, color='darkblue')+
-  labs(x = "Тривалість фільму", y = "Бюджет")+
-  theme(text = element_text(size = 125))+
-  theme_bw()+
-  scale_x_continuous(labels = function(x) paste(x, "min"))+
-  scale_y_continuous(labels = dollar_format(scale = 1e-6, suffix = "M"))
 
 
-# обмежити найбільші значення
-new_movies = subset(new_movies, new_movies$runtime < 500)
-
-# побудувати обмежений графік
-ggplot(new_movies, aes(x = runtime, y = budget))+
-  geom_point(alpha = 0.3, color='darkblue')+
-  labs(x = "Тривалість фільму", y = "Бюджет")+
-  theme(text = element_text(size = 125))+
-  theme_bw()+
-  scale_x_continuous(labels = function(x) paste(x, "min"))+
-  scale_y_continuous(labels = dollar_format(scale = 1e-6, suffix = "M"))
 
 
 
@@ -262,16 +258,242 @@ separate_genres <- movies %>%
 # перетворюємо стовпець з жанрами на факторний (необхідно для побудови графіка)
 separate_genres$genres <- as.factor(separate_genres$genres)
 
-# викремимо потрібні стовпці
-genres_budget <- separate_genres %>% select(id, genres, budget)
 
+
+
+# ДІ для медіан бюджету по жанрах
+
+set.seed(42)
+
+# відберемо потрібні стовпці для обчислень
+x <- separate_genres[, c("genres", "budget")] %>% 
+  filter(!is.na(budget))
+
+# статистика для бутстрепу
+boot_median <- function(x, indices){
+  n <- length(x)
+  median_bar <- median(x[indices])
+  return(median_bar)
+}
+
+# функція для розрахунку ДІ
+boot_median_ci <- function(budgets, R = 5000, conf = 0.95) {
+  
+  boot_out <- tryCatch({
+    boot(data = budgets, statistic = boot_median, R = R)
+  }, error = function(e) return(NULL))
+  
+  ci <- boot.ci(boot_out, type = c("norm", "basic", "perc"), conf = conf)
+  
+  ci_low_norm <- ci$norm[2]
+  ci_high_norm <- ci$norm[3]
+  
+  ci_low_basic <- ci$basic[4]
+  ci_high_basic <- ci$basic[5]
+  
+  ci_low_perc <- ci$percent[4]
+  ci_high_perc <- ci$percent[5]
+  
+  tibble(
+    median = median(budgets),
+    se = sd(boot_out$t),
+    n = n(),
+    ci_norm_low = ci_low_norm,
+    ci_norm_high = ci_high_norm,
+    ci_basic_low = ci_low_basic,
+    ci_basic_high = ci_high_basic,
+    ci_perc_low = ci_low_perc,
+    ci_perc_high = ci_high_perc
+  )
+}
+
+# застосування функції пошуку ДІ
+result <- x %>%
+  group_by(genres) %>%
+  summarise(
+    result = list(boot_median_ci(budget)),
+    .groups = "drop"
+  )%>%
+  unnest(result)
+
+# виведення таблиці
+result %>%
+  arrange(desc(median))%>%
+  view()
+
+# приведення таблиці до вигляду, зручного для побудови графіку
+medians <- separate_genres %>% 
+  select(id, genres, budget) %>%
+  group_by(genres) %>%
+  summarise(median_budget = median(budget, na.rm = TRUE))%>%
+  arrange(median_budget)
+
+result_wide <- result %>%
+  pivot_longer(
+    cols = starts_with("ci_"), 
+    names_to = c("method", ".value"),
+    names_pattern = "ci_(.*)_(low|high)"
+  ) %>%
+  select(genres, method, median, se, low, high)
+
+result_wide <- result_wide%>%
+  mutate(genres = factor(genres, levels = medians$genres[order(medians$median_budget)]))%>%
+  arrange(desc(median))
+
+# Побудова графіку
+ggplot(result_wide, aes(x = genres, ymin = low, ymax = high, color = method)) +
+  geom_errorbar(position = position_dodge(width = 0.5), width = 0.6, size = 1) +
+  geom_point(aes(y = median), color = "black", size = 1.8, shape = 16) +
+  coord_flip() +
+  labs(
+    y = "ДІ",
+    x = "Жанри",
+    title = "Бутстреп-ДІ для медіани бюджету по жанрах",
+    color = "Тип інтервалу"
+  ) +
+  theme_minimal()
+
+
+
+
+
+
+
+# ДІ для дисперсії тривалості по жанрах
+
+# відберемо потрібні стовпці для обчислень
+x <- separate_genres[, c("genres", "runtime")] %>% 
+  filter(!is.na(runtime))
+
+# розрахунки ДІ
+ci_var_runtime <- x %>% 
+  group_by(genres) %>%
+  filter(!is.na(genres))%>%
+  filter(!is.na(runtime))%>%
+  summarize(var = var(runtime),
+            n = n(),
+            sd = sd(runtime),
+            se = sd/sqrt(n),
+            a = var(runtime) + qnorm(0.025) * se,
+            b = var(runtime) + qnorm(0.975) * se
+  )%>%
+  arrange(desc(var))
+
+# виведення таблиці
+ci_var_runtime%>% 
+  view()
 
 # побудова графіка
-ggplot(genres_budget, aes(x=genres, y=budget, fill=genres)) + 
-  geom_violin(color = "black", alpha = 0.6)+
-  geom_boxplot(fill = "lightgreen", alpha = 0.5)+
-  scale_y_log10()+
-  labs(x = "Жанри", y = "Бюджет")+
-  theme_bw()+
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
-        legend.position = "none")
+ggplot(ci_var_runtime, aes(x = reorder(genres, var), y = var)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = a, ymax = b), width = 1) +
+  coord_flip() +
+  labs(
+    title = "ДІ для дисперсії тривалості по жанрах",
+    x = "Жанри",
+    y = "ДІ для дисперсії тривалості"
+  ) +
+  theme_minimal()
+
+
+
+
+
+# ДІ для середньої тривалості по жанрах
+
+# розрахунки ДІ
+ci_mean_runtime <- x %>% 
+  group_by(genres) %>%
+  filter(!is.na(genres))%>%
+  filter(!is.na(runtime))%>%
+  summarize(mean = mean(runtime),
+            n = n(),
+            sd = sd(runtime),
+            se = sd/sqrt(n),
+            a = mean(runtime) + qnorm(0.025) * se,
+            b = mean(runtime) + qnorm(0.975) * se
+  )%>%
+  arrange(desc(mean))
+
+# виведення таблиці
+ci_mean_runtime%>% 
+  view()
+
+# побудова графіка
+ggplot(ci_mean_runtime, aes(x = reorder(genres, mean), y = mean)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = a, ymax = b), width = 0.4) +
+  coord_flip() +
+  labs(
+    title = "ДІ для середньоЇ тривалості по жанрах",
+    x = "Жанри",
+    y = "ДІ для середньоЇ тривалості"
+  ) +
+  theme_minimal()
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ТЕСТУВАННЯ ГІПОТЕЗ
+
+# порівняння дисперсії бюджету для фільмів з тривалістю 80-150 хв і для інших фільмів
+
+# відберемо потрібні стовпці для обчислень
+runtime_split <- movies[, c("runtime", "budget")] %>% 
+  filter(!is.na(runtime))%>%
+  filter(!is.na(budget))
+
+# функція для розрахунку тесту Волда
+compare_budget <-function (runtime_split) {
+  
+  group_80_150 <- runtime_split %>% filter(runtime >= 80 & runtime <= 150)
+  group_other <- runtime_split %>% filter(runtime < 80 | runtime > 150)
+  
+  n_80_150 <- nrow(group_80_150)
+  n_other <- nrow(group_other)
+  
+  mean_hat_80_150 <- mean(group_80_150$budget, na.rm = TRUE)
+  mean_hat_other <- mean(group_other$budget, na.rm = TRUE)
+  
+  mean_hat_diff <- mean_hat_80_150 - mean_hat_other
+  
+  var_hat_80_150 <- var(group_80_150$budget, na.rm = TRUE)
+  var_hat_other <- var(group_other$budget, na.rm = TRUE)
+  
+  se_80_150 <- sqrt(var_hat_80_150 / n_80_150)
+  se_other <- sqrt(var_hat_other / n_other)
+  
+  se_diff <- sqrt(se_80_150^2 + se_other^2)
+  
+  T_stat <- mean_hat_diff / se_diff
+  p_value <- pnorm(T_stat, lower.tail = FALSE)
+  
+  conf_int <- c(mean_hat_diff - qnorm(0.95)*se_diff, Inf)
+  
+  reject <- ifelse(p_value < 0.05, "TRUE", "FALSE")
+  
+  tibble(
+    mean_hat_diff = mean_hat_diff,
+    se_diff = se_diff,
+    T_stat = T_stat,
+    p_value = p_value,
+    conf_int_lower = conf_int[1],
+    conf_int_upper = conf_int[2],
+    reject = reject
+  )
+}
+
+# застосування тесту Волда
+hypothesis <- compare_budget(runtime_split)
+
+# виведення таблиці
+hypothesis%>%view()
